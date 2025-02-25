@@ -16,4 +16,9 @@ class Department extends Model
     {
         return $this->hasMany(Subject::class)->whereNull('parent_id')->with('children')->orderBy('sort');
     }
+
+    public function children(): HasMany
+    {
+        return $this->hasMany(Subject::class)->whereNotNull('parent_id')->orderBy('sort');
+    }
 }

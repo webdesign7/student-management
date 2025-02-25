@@ -12,7 +12,7 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
-use Saade\FilamentAdjacencyList\Forms\Components\AdjacencyList;
+use App\Forms\Components\AdjacencyList;
 
 class DepartmentResource extends Resource
 {
@@ -28,14 +28,15 @@ class DepartmentResource extends Resource
                     ->label('Name')
                     ->required(),
                 AdjacencyList::make('subjects')
-                    ->relationship('subjects')          // Define the relationship
-                    ->labelKey('name')                  // Customize the label key to your model's column
-                    ->childrenKey('children')           // Customize the children key to the relationship's method name
-                    ->form([                            // Define the form
+                    ->relationship('subjects')
+                    ->labelKey('name')
+                    ->childrenKey('children')
+                    ->form([
                         Forms\Components\TextInput::make('name')
                             ->label(__('Name'))
                             ->required(),
                     ])
+                    ->orderColumn('sort')
             ]);
     }
 
