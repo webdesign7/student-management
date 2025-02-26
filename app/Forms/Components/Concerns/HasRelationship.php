@@ -43,53 +43,112 @@ trait HasRelationship
     });
 
     $this->saveRelationshipsUsing(static function (AdjacencyList $component, ?array $state) {
-      if (! is_array($state)) {
+      if (!is_array($state)) {
         $state = [];
       }
 
       $cachedExistingRecords = $component->getCachedExistingRecords();
       $relationship = $component->getRelationship();
       $childrenKey = $component->getChildrenKey();
-      $recordKeyName = $relationship->getRelated()->getKeyName();
       $orderColumn = $component->getOrderColumn();
-      $pivotAttributes = $component->getPivotAttributes();
+      $parentModel = $component->getModelInstance();
+      $rootSubjectId = null;
 
-      Arr::map(
-        $state,
-        $traverse = function (array $item, string $itemKey, array $siblings = []) use (&$traverse, &$cachedExistingRecords, $state, $relationship, $childrenKey, $recordKeyName, $orderColumn, $pivotAttributes): Model {
-          $record = $cachedExistingRecords->get($itemKey);
+      // Store root subject ID if in Department context
+      if ($parentModel instanceof \App\Models\Department) {
+        $rootSubjectId = $parentModel->root_subject_id;
+      }
 
-          /* Update item order */
-          if ($orderColumn) {
-            $record->{$orderColumn} = $pivotAttributes[$orderColumn] = array_search($itemKey, array_keys($siblings ?: $state));
+      // First pass: collect all existing IDs from the state
+      $existingIds = [];
+      $collectIds = function ($items) use (&$collectIds, &$existingIds, $childrenKey) {
+        foreach ($items as $item) {
+          if (isset($item['id'])) {
+            $existingIds[] = $item['id'];
           }
-
-          if ($relationship instanceof BelongsToMany) {
-            $record->save();
-          } else {
-            $relationship->save($record);
+          if (isset($item[$childrenKey]) && is_array($item[$childrenKey])) {
+            $collectIds($item[$childrenKey]);
           }
-
-          if ($children = data_get($item, $childrenKey)) {
-            $childrenRecords = collect($children)->map(fn(array $child, string $childKey) => $traverse($child, $childKey, $children));
-
-            if ($relationship instanceof BelongsToMany) {
-              $record->{$childrenKey}()->syncWithPivotValues(
-                $childrenRecords->pluck($recordKeyName),
-                $pivotAttributes()
-              );
-
-              return $record;
-            }
-
-            $record->{$childrenKey}()->saveMany($childrenRecords);
-          }
-
-          return $record;
         }
-      );
+      };
+      $collectIds($state);
 
-      // Clear cache
+      // Delete records that are no longer in the state
+      $model = $component->getRelatedModel();
+      if ($parentModel instanceof \App\Models\Department) {
+        $model::where('id', '!=', $rootSubjectId)
+          ->whereNotIn('id', $existingIds)
+          ->delete();
+      }
+
+      $traverse = function (array $item, string $itemKey, ?Model $parent = null, int $order = 0) use (&$traverse, &$cachedExistingRecords, $childrenKey, $orderColumn, $component, $rootSubjectId, $model): Model {
+        // Find existing record by ID first
+        $record = null;
+        if (isset($item['id'])) {
+          $record = $model::find($item['id']);
+        }
+
+        if (!$record && isset($item['id'])) {
+          $record = $cachedExistingRecords->first(function ($existingRecord) use ($item) {
+            return $existingRecord->id == $item['id'];
+          });
+        }
+
+        // Create new record if not found
+        if (!$record) {
+          $record = new $model();
+        }
+
+        // Fill record data
+        $record->fill(array_diff_key($item, [$childrenKey => true]));
+
+        // Handle sorting
+        if ($orderColumn) {
+          $record->{$orderColumn} = (string) $order;
+        }
+
+        // Save the record first
+        if (!$record->exists) {
+          $record->save();
+        }
+
+        // Handle parent relationship using nested set methods
+        if ($parent) {
+          if ($record->parent_id !== $parent->id) {
+            $record->appendToNode($parent)->save();
+          }
+        } elseif ($rootSubjectId && $record->id !== $rootSubjectId) {
+          $rootNode = $model::find($rootSubjectId);
+          if ($rootNode && $record->parent_id !== $rootNode->id) {
+            $record->appendToNode($rootNode)->save();
+          }
+        } else {
+          if ($record->parent_id !== null) {
+            $record->saveAsRoot();
+          }
+        }
+
+        // Process children
+        if ($children = data_get($item, $childrenKey)) {
+          $childOrder = 0;
+          foreach ($children as $childKey => $child) {
+            $traverse($child, $childKey, $record, $childOrder++);
+          }
+        }
+
+        return $record;
+      };
+
+      // Process all records
+      foreach ($state as $itemKey => $item) {
+        $traverse($item, $itemKey, null, 0);
+      }
+
+      // Fix the tree structure
+      $model::fixTree();
+
+      // Clear and reload the cache
+      $component->clearCachedExistingRecords();
       $component->fillFromRelationship();
     });
 
@@ -136,52 +195,40 @@ trait HasRelationship
     });
 
     $this->addChildAction(function (Action $action): void {
-      $action->using(function (Component $component, Model $parentRecord, array $data, array $arguments): void {
+      $action->using(function (Component $component, ?Model $parentRecord, array $data, array $arguments): void {
         $relationship = $component->getRelationship();
         $model = $component->getRelatedModel();
+        $parentModel = $component->getModelInstance();
 
-        $pivotData = $component->getPivotAttributes() ?? [];
+        // Initialize the record
+        $record = new $model();
+        $record->fill($data);
 
-        if ($relationship instanceof BelongsToMany) {
-          $pivotColumns = $relationship->getPivotColumns();
+        // If this is a Department context
+        if ($parentModel instanceof \App\Models\Department) {
+          $rootSubjectId = $parentModel->root_subject_id;
 
-          $pivotData = Arr::only($data, $pivotColumns);
-          $data = Arr::except($data, $pivotColumns);
+          // If no parent record but we have a root subject, use root as parent
+          if (!$parentRecord && $rootSubjectId) {
+            $parentRecord = $model::find($rootSubjectId);
+          }
         }
 
-        $data = $component->mutateRelationshipDataBeforeCreate($data);
-
-        if ($translatableContentDriver = $component->getLivewire()->makeFilamentTranslatableContentDriver()) {
-          $record = $translatableContentDriver->makeRecord($model, $data);
-        } else {
-          $record = new $model();
-          $record->fill($data);
-        }
-
+        // Handle sorting
         if ($orderColumn = $component->getOrderColumn()) {
-          $record->{$orderColumn} = $pivotData[$orderColumn] = count(
-            data_get(
-              $component->getState(),
-              $component->getRelativeStatePath($arguments['statePath']) . '.' . $component->getChildrenKey()
-            )
-          );
+          $existingCount = 0;
+          if ($parentRecord) {
+            $existingCount = $parentRecord->children()->count();
+          }
+          $record->{$orderColumn} = $existingCount;
         }
 
-        if ($relationship instanceof BelongsToMany) {
-          $record->save();
-
-          $parentRecord->{$component->getChildrenKey()}()->syncWithPivotValues(
-            [$record->getKey()],
-            $pivotData
-          );
-
-          $component->cacheRecord($record);
-
-          return;
+        // Set parent relationship
+        if ($parentRecord) {
+          $record->parent_id = $parentRecord->id;
         }
 
-        $parentRecord->{$component->getChildrenKey()}()->save($record);
-
+        $record->save();
         $component->cacheRecord($record);
       });
     });
@@ -220,17 +267,42 @@ trait HasRelationship
     });
 
     $this->deleteAction(function (Action $action): void {
-      $action->using(function (Component $component, Model $record): void {
+      $action->using(function (Component $component, ?Model $record): void {
+        // Get the record from cache if not provided
+        if (!$record) {
+          $cachedExistingRecords = $component->getCachedExistingRecords();
+          $itemKey = $component->getState()['record'] ?? null;
+          if ($itemKey) {
+            $record = $cachedExistingRecords->get($itemKey);
+          }
+
+          if (!$record) {
+            return;
+          }
+        }
+
         $relationship = $component->getRelationship();
+        $parentModel = $component->getModelInstance();
 
-        if ($relationship instanceof BelongsToMany) {
-          $pivot = $record->{$relationship->getPivotAccessor()};
+        // If this is a Department, prevent deleting the root subject
+        if ($parentModel instanceof \App\Models\Department) {
+          $rootSubjectId = $parentModel->root_subject_id;
+          if ($rootSubjectId && $record->id === $rootSubjectId) {
+            return;
+          }
+        }
 
-          $pivot->delete();
+        // Delete children recursively
+        if (method_exists($record, 'children')) {
+          foreach ($record->children()->get() as $child) {
+            if (method_exists($child, 'children')) {
+              $child->children()->delete();
+            }
+            $child->delete();
+          }
         }
 
         $record->delete();
-
         $component->deleteCachedRecord($record);
       });
     });
@@ -361,7 +433,7 @@ trait HasRelationship
     }
 
     if ($orderColumn = $this->getOrderColumn()) {
-      $relationshipQuery->orderBy('subjects.' . $orderColumn);
+      $relationshipQuery->orderBy($orderColumn, 'asc');
     }
 
     $this->cachedExistingRecords = $relationshipQuery->with('children')->get();
