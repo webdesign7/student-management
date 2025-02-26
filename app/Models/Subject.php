@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Kalnoy\Nestedset\NodeTrait;
 use \Staudenmeir\LaravelAdjacencyList\Eloquent\HasRecursiveRelationships;
 
@@ -15,23 +16,33 @@ class Subject extends Model
 
     public $timestamps = false;
 
-    protected $fillable  = ['parent_id', 'name', 'sort']; // or whatever your columns are
+    protected $fillable = ['parent_id', 'name', 'sort', '_lft', '_rgt'];
 
-    // Add this method to make it compatible with adjacency list expectations
-    public function children()
+    public function ancestors()
     {
-        return $this->hasMany(static::class, 'parent_id');
+        return $this->belongsToMany(static::class, 'subjects', 'id', 'parent_id')
+            ->withPivot(['_lft', '_rgt']);
     }
 
-    // Add this to maintain compatibility with the adjacency list component
+    public function children(): HasMany
+    {
+        return $this->hasMany(static::class, 'parent_id')
+            ->orderBy('subjects.sort')
+            ->with('children');
+    }
+
+    public function parent(): BelongsTo
+    {
+        return $this->belongsTo(static::class, 'parent_id');
+    }
+
     public function getChildrenAttribute()
     {
         return $this->children()->get();
     }
 
-    // Optional: Add this if you need to query ancestors
-    public function parent()
+    public function departments(): HasMany
     {
-        return $this->belongsTo(static::class, 'parent_id');
+        return $this->hasMany(Department::class, 'root_subject_id');
     }
 }

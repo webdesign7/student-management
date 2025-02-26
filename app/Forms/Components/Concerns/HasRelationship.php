@@ -256,12 +256,10 @@ trait HasRelationship
       return [];
     }
 
-
     return $records
-      ->toTree()  // change-1
+      ->toTree()
       ->mapWithKeys(
         $cb = function (Model $record) use (&$cb): array {
-
           $childrenKey = $this->getChildrenKey();
 
           $data = $this->mutateRelationshipDataBeforeFill(
@@ -272,7 +270,11 @@ trait HasRelationship
 
           $key = md5('record-' . $record->getKey());
 
-          $data[$childrenKey] = $record->{$childrenKey}->mapWithKeys($cb)->toArray();
+          if ($record->children) {
+            $data[$childrenKey] = $record->children->mapWithKeys($cb)->toArray();
+          } else {
+            $data[$childrenKey] = [];
+          }
 
           return [$key => $data];
         }
@@ -336,11 +338,21 @@ trait HasRelationship
 
     $relationship = $this->getRelationship();
     $relationshipQuery = $relationship->getQuery();
+    $parentModel = $this->getModelInstance();
 
-
-    $relationshipQuery->fixTree();
-
-    //dd($relationshipQuery->get()->toFlatTree());
+    if ($parentModel instanceof \App\Models\Department) {
+      $rootSubjectId = $parentModel->root_subject_id;
+      if ($rootSubjectId) {
+        $relationshipQuery->where(function ($query) use ($rootSubjectId) {
+          $query->where('subjects.id', $rootSubjectId)
+            ->orWhere(function ($q) use ($rootSubjectId) {
+              $q->whereHas('ancestors', function ($aq) use ($rootSubjectId) {
+                $aq->where('subjects.id', $rootSubjectId);
+              });
+            });
+        });
+      }
+    }
 
     if ($this->modifyRelationshipQueryUsing) {
       $relationshipQuery = $this->evaluate($this->modifyRelationshipQueryUsing, [
@@ -349,21 +361,12 @@ trait HasRelationship
     }
 
     if ($orderColumn = $this->getOrderColumn()) {
-      $relationshipQuery->orderBy($orderColumn);
+      $relationshipQuery->orderBy('subjects.' . $orderColumn);
     }
 
-    $val = $this->cachedExistingRecords = $relationshipQuery->get()
-      ->mapWithKeys(function (Model $record): array {
-        $items = [md5('record-' . $record->getKey()) => $record];
-        foreach ($record->descendants as $child) {
-          $items[md5('record-' . $child->getKey())] = $child;
-        }
-        return $items;
-      });
+    $this->cachedExistingRecords = $relationshipQuery->with('children')->get();
 
-    //dd($val);
-
-    return $val;
+    return $this->cachedExistingRecords;
   }
 
   public function clearCachedExistingRecords(): void
