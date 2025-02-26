@@ -12,7 +12,7 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\SoftDeletingScope;
-use App\Forms\Components\AdjacencyList;
+use App\Forms\Components\NestedSetList;
 
 class DepartmentResource extends Resource
 {
@@ -27,15 +27,10 @@ class DepartmentResource extends Resource
                 Forms\Components\TextInput::make('name')
                     ->label('Name')
                     ->required(),
-                AdjacencyList::make('subjects')
+                NestedSetList::make('subjects')
                     ->relationship('subjects')
                     ->labelKey('name')
                     ->childrenKey('children')
-                    ->form([
-                        Forms\Components\TextInput::make('name')
-                            ->label(__('Name'))
-                            ->required(),
-                    ])
                     ->orderColumn('sort')
             ]);
     }
