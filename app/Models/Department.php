@@ -16,7 +16,7 @@ class Department extends Model
     public function subjects(): HasMany
     {
         return $this->hasMany(Subject::class, 'id', 'root_subject_id')
-            ->with('children.children.children')
+            ->with('descendants')
             ->orderBy('sort');
     }
 
